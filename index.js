@@ -2,12 +2,11 @@ require("dotenv").config();
 const axios = require("axios");
 const express = require("express");
 const http = require("http");
-const { disconnect } = require("process");
 const { Server } = require("socket.io");
 
 async function getImages() {
   const requestUrl =
-    "https://api.iconfinder.com/v4/icons/search?query=animal&count=57";
+    "https://api.iconfinder.com/v4/icons/search?query=candy&count=57";
   const images = await axios
     .request(requestUrl, {
       headers: { Authorization: "Bearer " + process.env.API_KEY },
@@ -72,9 +71,9 @@ const players = [];
     });
 
     let deck = createDeck(8, imagesArray);
-
+    console.log(deck[0]);
     shuffledDeck = shuffle(deck);
-    console.log(shuffledDeck);
+    console.log(shuffledDeck[0]);
   } catch (err) {
     console.error(err);
   }
@@ -83,7 +82,21 @@ io.on("connection", (socket) => {
   console.log("New Websocket connection:", socket.id);
   socket.on("setUsername", (username) => {
     players.push({ id: socket.id, name: username, score: 0 });
-    console.log(players);
+    if (players.length === 2) {
+      //change to 2 players
+      const startTime = Date.now() + 3000; // Game starts in 3 seconds
+      io.emit("startCountdown", startTime);
+      const timeout = setTimeout(() => {
+        io.emit("deckState", shuffledDeck.pop());
+        players.forEach((player) => {
+          io.to(player.id).emit("drawnCard", shuffledDeck.pop());
+          io.emit("startGame");
+        });
+      }, 3000);
+      return () => {
+        clearTimeout(timeout);
+      };
+    }
   });
   socket.on("getDeck", () => {
     socket.emit("deckState", shuffledDeck);
@@ -91,8 +104,13 @@ io.on("connection", (socket) => {
   socket.on("getPlayers", () => {
     socket.emit("playersState", players);
   });
-  socket.on("getFirstMove", () => {
-    socket.emit("deckState", shuffledDeck.pop());
+  socket.on("updateScore", () => {
+    const player = players.find((player) => {
+      return player.id === socket.id;
+    });
+    player.score++;
+    socket.emit("playersState", players);
+    io.emit("message", `נקודה ל${player.name}!`);
   });
   socket.on("disconnect", () => {
     const index = players.findIndex((player) => {
