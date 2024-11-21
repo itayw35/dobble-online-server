@@ -1,5 +1,6 @@
 require("dotenv").config();
 const axios = require("axios");
+const { log } = require("console");
 const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
@@ -59,6 +60,8 @@ const io = new Server(server, {
 
 app.use(express.json());
 let shuffledDeck;
+let lastCard;
+let clicks = 0;
 const players = [];
 (async () => {
   try {
@@ -71,13 +74,24 @@ const players = [];
     });
 
     let deck = createDeck(8, imagesArray);
-    console.log(deck[0]);
     shuffledDeck = shuffle(deck);
-    console.log(shuffledDeck[0]);
   } catch (err) {
     console.error(err);
   }
 })();
+const checkWinner = () => {
+  let winner = [{ name: "", score: 0 }];
+  for (const player of players) {
+    if (player.score > winner[0].score) {
+      winner = [player];
+    } else if (player.score === winner[0].score) {
+      winner.push(player);
+    } else {
+      continue;
+    }
+  }
+  io.emit("winner", winner);
+};
 io.on("connection", (socket) => {
   console.log("New Websocket connection:", socket.id);
   socket.on("setUsername", (username) => {
@@ -87,7 +101,8 @@ io.on("connection", (socket) => {
       const startTime = Date.now() + 3000; // Game starts in 3 seconds
       io.emit("startCountdown", startTime);
       const timeout = setTimeout(() => {
-        io.emit("deckState", shuffledDeck.pop());
+        lastCard = shuffledDeck.pop();
+        io.emit("deckState", lastCard);
         players.forEach((player) => {
           io.to(player.id).emit("drawnCard", shuffledDeck.pop());
           io.emit("startGame");
@@ -105,12 +120,36 @@ io.on("connection", (socket) => {
     socket.emit("playersState", players);
   });
   socket.on("updateScore", () => {
-    const player = players.find((player) => {
-      return player.id === socket.id;
-    });
-    player.score++;
-    socket.emit("playersState", players);
-    io.emit("message", `נקודה ל${player.name}!`);
+    if (clicks === 0) {
+      const player = players.find((player) => {
+        return player.id === socket.id;
+      });
+      player.score++;
+      socket.emit("playersState", players);
+      io.emit("message", `נקודה ל${player.name}!`);
+      clicks++;
+    }
+  });
+  socket.on("nextCard", () => {
+    if (shuffledDeck.length >= 2) {
+      const newDeckCard = shuffledDeck.pop();
+      io.emit("deckState", newDeckCard);
+      const player = players.find((player) => {
+        return player.id === socket.id;
+      });
+      io.to(player.id).emit("drawnCard", lastCard);
+      const restOfPlayers = players.filter((pl) => {
+        return pl.id != socket.id;
+      });
+
+      restOfPlayers.forEach((pla) => {
+        io.to(pla.id).emit("drawnCard", shuffledDeck.pop());
+      });
+      lastCard = newDeckCard;
+      clicks = 0;
+    } else {
+      checkWinner();
+    }
   });
   socket.on("disconnect", () => {
     const index = players.findIndex((player) => {
