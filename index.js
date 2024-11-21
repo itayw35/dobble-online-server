@@ -131,6 +131,7 @@ io.on("connection", (socket) => {
     }
   });
   socket.on("nextCard", () => {
+    clicks = 0;
     if (shuffledDeck.length >= 2) {
       const newDeckCard = shuffledDeck.pop();
       io.emit("deckState", newDeckCard);
@@ -146,7 +147,6 @@ io.on("connection", (socket) => {
         io.to(pla.id).emit("drawnCard", shuffledDeck.pop());
       });
       lastCard = newDeckCard;
-      clicks = 0;
     } else {
       checkWinner();
     }
