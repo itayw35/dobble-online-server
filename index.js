@@ -5,26 +5,63 @@ const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
 
+
+// --------------------------------------------------
+// Get icons from Iconify
+// --------------------------------------------------
+
 async function getImages() {
   const requestUrl =
-    "https://api.iconfinder.com/v4/icons/search?query=candy&count=57";
+    "https://api.iconify.design/search?query=candy&limit=64";
 
-  const images = await axios
-    .request(requestUrl, {
-      headers: {
-        Authorization: "Bearer " + process.env.API_KEY,
-      },
-    })
-    .catch((err) => {
-      console.log(err);
-      throw {
-        code: 400,
-        message: "A problem occurred while getting images",
+  try {
+    const response = await axios.get(requestUrl);
+
+    if (!response.data || !Array.isArray(response.data.icons)) {
+      throw new Error("Invalid response received from Iconify API");
+    }
+
+    const iconNames = response.data.icons;
+
+    // We need at least 57 icons for createDeck(8).
+    if (iconNames.length < 57) {
+      throw new Error(
+        `Iconify returned only ${iconNames.length} icons. Need at least 57.`
+      );
+    }
+
+    // Use exactly 57 icons, as the original Iconfinder
+    // implementation did.
+    return iconNames.slice(0, 57).map((iconName) => {
+      const [prefix, name] = iconName.split(":");
+
+      if (!prefix || !name) {
+        throw new Error(`Invalid Iconify icon name: ${iconName}`);
+      }
+
+      return {
+        src: `https://api.iconify.design/${prefix}/${name}.svg`,
+        alt: name,
       };
     });
+  } catch (err) {
+    console.error("Failed to get icons from Iconify:");
 
-  return images.data;
+    if (err.response) {
+      console.error("HTTP status:", err.response.status);
+      console.error("Response:", err.response.data);
+    } else {
+      console.error(err.message);
+    }
+
+    throw err;
+  }
 }
+
+
+// --------------------------------------------------
+// Shuffle
+// --------------------------------------------------
 
 function shuffle(arr) {
   const shuffledArr = [...arr];
@@ -40,6 +77,11 @@ function shuffle(arr) {
 
   return shuffledArr;
 }
+
+
+// --------------------------------------------------
+// Create Dobble deck
+// --------------------------------------------------
 
 function createDeck(n, images) {
   const cards = [];
@@ -75,7 +117,13 @@ function createDeck(n, images) {
   return cards;
 }
 
+
+// --------------------------------------------------
+// Express / HTTP / Socket.IO
+// --------------------------------------------------
+
 const app = express();
+
 const PORT = process.env.PORT;
 
 const server = http.createServer(app);
@@ -89,42 +137,46 @@ const io = new Server(server, {
 
 app.use(express.json());
 
+
+// --------------------------------------------------
+// Game state
+// --------------------------------------------------
+
 let shuffledDeck = null;
 let lastCard = null;
 let clicks = 0;
 
 const players = [];
 
-// Used to keep track of the countdown timer.
 let startTimeout = null;
 
+
 // --------------------------------------------------
-// Initialize the game deck BEFORE starting server
+// Initialize game
 // --------------------------------------------------
 
 async function initializeGame() {
   console.log("Initializing game...");
 
-  const images = await getImages();
+  const imagesArray = await getImages();
 
-  const imagesArray = images.icons.map((icon) => {
-    return {
-      src: icon.raster_sizes[5].formats[0].preview_url,
-      alt:
-        icon.categories.length > 0
-          ? icon.categories[0].name
-          : "img",
-    };
-  });
+  console.log(
+    `Successfully loaded ${imagesArray.length} icons.`
+  );
 
   const deck = createDeck(8, imagesArray);
+
+  console.log(
+    `Created deck with ${deck.length} cards.`
+  );
 
   shuffledDeck = shuffle(deck);
 
   console.log(
-    `Game initialized successfully with ${shuffledDeck.length} cards.`
+    `Deck shuffled. ${shuffledDeck.length} cards available.`
   );
 }
+
 
 // --------------------------------------------------
 // Check winner
@@ -144,15 +196,25 @@ const checkWinner = () => {
   io.emit("winner", winner);
 };
 
+
 // --------------------------------------------------
-// Socket.IO
+// Socket.IO connection
 // --------------------------------------------------
 
 io.on("connection", (socket) => {
-  console.log("New Websocket connection:", socket.id);
+  console.log(
+    "New Websocket connection:",
+    socket.id
+  );
+
+
+  // ------------------------------------------------
+  // Set username
+  // ------------------------------------------------
 
   socket.on("setUsername", (username) => {
-    // Prevent the same socket from registering multiple times.
+
+    // Prevent duplicate registration of the same socket.
     const existingPlayer = players.find(
       (player) => player.id === socket.id
     );
@@ -169,10 +231,14 @@ io.on("connection", (socket) => {
 
     io.emit("playersState", players);
 
+    console.log(
+      `Player joined: ${username}. Players: ${players.length}`
+    );
+
+
     // Start game when there are exactly 2 players.
     if (players.length === 2) {
-      // Safety check. This should always be initialized because
-      // the server only starts after initializeGame() completes.
+
       if (!Array.isArray(shuffledDeck)) {
         console.error(
           "Cannot start game: shuffledDeck is not initialized."
@@ -180,41 +246,47 @@ io.on("connection", (socket) => {
         return;
       }
 
-      // Prevent an existing countdown from being scheduled twice.
+      // Cancel an existing countdown.
       if (startTimeout) {
         clearTimeout(startTimeout);
+        startTimeout = null;
       }
 
       const startTime = Date.now() + 3000;
 
       io.emit("startCountdown", startTime);
 
+      console.log("Game countdown started.");
+
       startTimeout = setTimeout(() => {
+
         startTimeout = null;
 
-        // Check that both players are still connected.
+        // Make sure both players are still connected.
         if (players.length !== 2) {
           console.log(
-            "Game start cancelled because there are no longer 2 players."
+            "Game start cancelled: no longer 2 players."
           );
           return;
         }
 
-        // Make sure there are enough cards.
+        // We need at least 3 cards:
+        // one common card + one card for each player.
         if (shuffledDeck.length < 3) {
           console.error(
             "Not enough cards to start the game."
           );
+
           checkWinner();
           return;
         }
 
-        // Draw the common/last card.
+        // Draw common card.
         lastCard = shuffledDeck.pop();
 
         io.emit("deckState", lastCard);
 
-        // Give each player a card.
+        // Draw one card for every player.
         players.forEach((player) => {
           io.to(player.id).emit(
             "drawnCard",
@@ -222,46 +294,61 @@ io.on("connection", (socket) => {
           );
         });
 
-        // Start the game ONCE, not once per player.
+        // Start the game ONCE.
         io.emit("startGame");
+
+        console.log("Game started.");
       }, 3000);
     }
   });
 
-  // --------------------------------------------------
-  // Get current deck
-  // --------------------------------------------------
+
+  // ------------------------------------------------
+  // Get deck
+  // ------------------------------------------------
 
   socket.on("getDeck", () => {
-    socket.emit("deckState", shuffledDeck);
+    socket.emit(
+      "deckState",
+      shuffledDeck
+    );
   });
 
-  // --------------------------------------------------
+
+  // ------------------------------------------------
   // Get players
-  // --------------------------------------------------
+  // ------------------------------------------------
 
   socket.on("getPlayers", () => {
-    socket.emit("playersState", players);
+    socket.emit(
+      "playersState",
+      players
+    );
   });
 
-  // --------------------------------------------------
+
+  // ------------------------------------------------
   // Update score
-  // --------------------------------------------------
+  // ------------------------------------------------
 
   socket.on("updateScore", () => {
+
     if (clicks === 0) {
+
       const player = players.find(
         (player) => player.id === socket.id
       );
 
-      // Make sure the player still exists.
       if (!player) {
         return;
       }
 
       player.score++;
 
-      socket.emit("playersState", players);
+      socket.emit(
+        "playersState",
+        players
+      );
 
       io.emit(
         "message",
@@ -272,14 +359,15 @@ io.on("connection", (socket) => {
     }
   });
 
-  // --------------------------------------------------
+
+  // ------------------------------------------------
   // Next card
-  // --------------------------------------------------
+  // ------------------------------------------------
 
   socket.on("nextCard", () => {
+
     clicks = 0;
 
-    // Safety check.
     if (!Array.isArray(shuffledDeck)) {
       console.error(
         "Cannot draw next card: shuffledDeck is not initialized."
@@ -288,9 +376,14 @@ io.on("connection", (socket) => {
     }
 
     if (shuffledDeck.length >= 2) {
-      const newDeckCard = shuffledDeck.pop();
 
-      io.emit("deckState", newDeckCard);
+      const newDeckCard =
+        shuffledDeck.pop();
+
+      io.emit(
+        "deckState",
+        newDeckCard
+      );
 
       const player = players.find(
         (player) => player.id === socket.id
@@ -300,16 +393,18 @@ io.on("connection", (socket) => {
         return;
       }
 
-      // Give the player who clicked the previous last card.
+      // Give the player who clicked
+      // the previous common card.
       io.to(player.id).emit(
         "drawnCard",
         lastCard
       );
 
-      // Give the remaining players a new card.
-      const restOfPlayers = players.filter(
-        (pl) => pl.id !== socket.id
-      );
+      // Give the other players a new card.
+      const restOfPlayers =
+        players.filter(
+          (pl) => pl.id !== socket.id
+        );
 
       restOfPlayers.forEach((pla) => {
         io.to(pla.id).emit(
@@ -318,18 +413,21 @@ io.on("connection", (socket) => {
         );
       });
 
-      // The newly displayed deck card becomes the last card.
       lastCard = newDeckCard;
+
     } else {
+
       checkWinner();
     }
   });
 
-  // --------------------------------------------------
+
+  // ------------------------------------------------
   // Disconnect
-  // --------------------------------------------------
+  // ------------------------------------------------
 
   socket.on("disconnect", () => {
+
     console.log(
       "Websocket disconnected:",
       socket.id
@@ -343,39 +441,61 @@ io.on("connection", (socket) => {
       players.splice(index, 1);
     }
 
-    // Cancel countdown if a player leaves before the game starts.
-    if (startTimeout && players.length < 2) {
+    // Cancel countdown if a player leaves.
+    if (
+      startTimeout &&
+      players.length < 2
+    ) {
       clearTimeout(startTimeout);
       startTimeout = null;
 
       console.log(
-        "Game countdown cancelled because a player disconnected."
+        "Game countdown cancelled."
       );
     }
 
-    io.emit("playersState", players);
+    io.emit(
+      "playersState",
+      players
+    );
   });
 });
 
+
 // --------------------------------------------------
-// Start server ONLY after game initialization
+// Start server only after initialization
 // --------------------------------------------------
 
 initializeGame()
   .then(() => {
+
     server.listen(PORT, () => {
-      console.log("connection succeeded!");
-      console.log(`Server listening on port ${PORT}`);
+      console.log(
+        "connection succeeded!"
+      );
+
+      console.log(
+        `Server listening on port ${PORT}`
+      );
     });
+
   })
   .catch((err) => {
+
     console.error(
-      "Failed to initialize game. Server will not start.",
-      err
+      "Failed to initialize game."
     );
 
+    console.error(err);
+
+    // Do not start a broken server.
     process.exit(1);
   });
+
+
+// --------------------------------------------------
+// Optional routes
+// --------------------------------------------------
 
 // app.use("/games", require("./Routes/gameRouter"));
 // app.use("/users", require("./Routes/userRouter"));
